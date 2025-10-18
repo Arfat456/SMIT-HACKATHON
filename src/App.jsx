@@ -10,6 +10,7 @@ import Signup from "./components/Signup";
 import Home from "./components/Home";
 import Pitch from "./components/Pitch";
 import PitchResult from "./components/PitchResult";
+import Dashboard from "./components/Dashboard";
 
 function App() {
   const [user, setUser] = useState(null);
@@ -92,6 +93,14 @@ function App() {
           element={
             <ProtectedRoute>
               <PitchResult />
+            </ProtectedRoute>
+          } 
+        />
+        <Route 
+          path="/dashboard" 
+          element={
+            <ProtectedRoute>
+              <Dashboard />
             </ProtectedRoute>
           } 
         />

@@ -32,14 +32,30 @@ function Login() {
     }
 
     try {
-      await login(email, password);
+      const user = await login(email, password);
       setSuccess('Login successful!');
-      // Redirect to home page after successful login
-      setTimeout(() => {
-        navigate('/');
-      }, 1000);
+      
+      // Check if user exists
+      if (user) {
+        console.log('User authenticated:', user.uid);
+        // Redirect to home page after successful login
+        setTimeout(() => {
+          navigate('/');
+        }, 1000);
+      } else {
+        setError('Authentication failed. Please try again.');
+      }
     } catch (error) {
-      setError(error.message);
+      // Handle specific Firebase auth errors
+      if (error.code === 'auth/user-not-found') {
+        setError('No account found with this email. Please sign up.');
+      } else if (error.code === 'auth/wrong-password') {
+        setError('Incorrect password. Please try again.');
+      } else if (error.code === 'auth/too-many-requests') {
+        setError('Too many failed login attempts. Please try again later.');
+      } else {
+        setError(error.message || 'Login failed. Please try again.');
+      }
     } finally {
       setLoading(false);
     }

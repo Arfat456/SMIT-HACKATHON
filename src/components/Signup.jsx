@@ -1,6 +1,7 @@
 import { useState } from 'react';
-import { signUp } from '../config/firebase';
+import { signUp, db } from '../config/firebase';
 import { Link, useNavigate } from 'react-router-dom';
+import { doc, updateDoc } from 'firebase/firestore';
 
 function Signup() {
   const [name, setName] = useState('');
@@ -40,7 +41,19 @@ function Signup() {
     }
 
     try {
-      await signUp(email, password);
+      // Create user with email and password - user document is created in firebase.js
+      const user = await signUp(email, password);
+      
+      // Update the user document with the name
+      try {
+        await updateDoc(doc(db, 'users', user.uid), {
+          name: name
+        });
+      } catch (firestoreError) {
+        console.error('Error updating user name:', firestoreError);
+        // Continue with signup even if updating name fails
+      }
+      
       setSuccess('Account created successfully!');
       // Redirect to home page after successful signup
       setTimeout(() => {

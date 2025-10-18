@@ -13,7 +13,10 @@ import {
   getDocs,
   doc,
   updateDoc,
-  deleteDoc
+  deleteDoc,
+  setDoc,
+  getDoc,
+  serverTimestamp
 } from "firebase/firestore";
 
 // ========== Your Firebase Config ==========
@@ -38,8 +41,23 @@ const db = getFirestore(app);
 export async function signUp(email, password) {
   try {
     const userCredential = await createUserWithEmailAndPassword(auth, email, password);
-    console.log("User signed up:", userCredential.user);
-    return userCredential.user;
+    const user = userCredential.user;
+    
+    // Create a user document in Firestore
+    try {
+      await setDoc(doc(db, 'users', user.uid), {
+        uid: user.uid,
+        email: user.email,
+        createdAt: new Date()
+      });
+      console.log("User document created in Firestore");
+    } catch (firestoreError) {
+      console.error("Error creating user document:", firestoreError);
+      // Continue with signup even if Firestore fails
+    }
+    
+    console.log("User signed up:", user);
+    return user;
   } catch (error) {
     console.error("Signup Error:", error.message);
     throw error;
@@ -118,16 +136,28 @@ export async function deleteData(collectionName, id) {
 }
 
 // Save AI Response to Firestore
-export const saveAIResponse = async (prompt, response) => {
+export const saveAIResponse = async (prompt, response, userId = null) => {
   try {
-    await addDoc(collection(db, "geminiResponses"), {
-      prompt: prompt,
-      response: response,
-      createdAt: new Date(),
-    });
+    // If user is logged in, save to their collection
+    if (userId) {
+      await addDoc(collection(db, `users/${userId}/geminiResponses`), {
+        prompt: prompt,
+        response: response,
+        createdAt: new Date(),
+      });
+    } else {
+      // Save to general collection if no user ID
+      await addDoc(collection(db, "geminiResponses"), {
+        prompt: prompt,
+        response: response,
+        createdAt: new Date(),
+      });
+    }
     console.log("✅ Data saved to Firestore!");
+    return true;
   } catch (error) {
     console.error("Firestore Error:", error);
+    throw error;
   }
 };
 

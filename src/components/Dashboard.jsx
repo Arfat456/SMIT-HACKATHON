@@ -1,481 +1,514 @@
 import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { auth, db, logout } from '../config/firebase';
-import { collection, query, where, getDocs, deleteDoc, doc, orderBy } from 'firebase/firestore';
+import { auth, db } from '../config/firebase';
+import { signOut } from 'firebase/auth';
+import { collection, doc, getDoc, getDocs, query, orderBy } from 'firebase/firestore';
 import html2pdf from 'html2pdf.js';
 
 function Dashboard() {
   const navigate = useNavigate();
   const [user, setUser] = useState(null);
+  const [userProfile, setUserProfile] = useState(null);
   const [pitches, setPitches] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
-  const [success, setSuccess] = useState('');
   const [selectedPitch, setSelectedPitch] = useState(null);
   const [showModal, setShowModal] = useState(false);
-  const [searchTerm, setSearchTerm] = useState('');
-  const [isGeneratingPdf, setIsGeneratingPdf] = useState(false);
-  const [isSidebarOpen, setIsSidebarOpen] = useState(true);
-  const [isDarkMode, setIsDarkMode] = useState(false);
+  const [generatingPdf, setGeneratingPdf] = useState(false);
 
   useEffect(() => {
     // Check for user authentication
     const currentUser = auth.currentUser;
     if (currentUser) {
       setUser(currentUser);
+      fetchUserData(currentUser.uid);
       fetchUserPitches(currentUser.uid);
     } else {
       navigate('/login');
     }
   }, [navigate]);
 
-  const fetchUserPitches = async (userId) => {
-    setLoading(true);
+  const fetchUserData = async (userId) => {
     try {
-      const pitchesRef = collection(db, `users/${userId}/geminiResponses`);
-      const q = query(pitchesRef, orderBy('createdAt', 'desc'));
-      const querySnapshot = await getDocs(q);
+      const userDocRef = doc(db, 'users', userId);
+      const userDoc = await getDoc(userDocRef);
       
-      const pitchesData = [];
-      querySnapshot.forEach((doc) => {
+      if (userDoc.exists()) {
+        setUserProfile(userDoc.data());
+      }
+    } catch (error) {
+      console.error('Error fetching user data:', error);
+      setError('Failed to load user profile');
+    }
+  };
+
+  const fetchUserPitches = async (userId) => {
+    try {
+      // Fetch user's ideas
+      const ideasQuery = query(
+        collection(db, `users/${userId}/ideas`),
+        orderBy('createdAt', 'desc')
+      );
+      const ideasSnapshot = await getDocs(ideasQuery);
+      
+      // Fetch AI responses
+      const responsesQuery = query(
+        collection(db, `users/${userId}/ai_responses`),
+        orderBy('timestamp', 'desc')
+      );
+      const responsesSnapshot = await getDocs(responsesQuery);
+      
+      // Process ideas data
+      const ideasData = [];
+      ideasSnapshot.forEach((doc) => {
         const data = doc.data();
-        // Parse the response to extract startup name and summary
-        const parsedResponse = parseGeminiResponse(data.response);
-        
-        pitchesData.push({
+        ideasData.push({
           id: doc.id,
-          startupName: parsedResponse.startupName || 'Unnamed Startup',
-          summary: getSummary(parsedResponse.pitch || data.response),
-          createdAt: data.createdAt ? new Date(data.createdAt.seconds * 1000) : new Date(),
-          fullResponse: data.response,
-          prompt: data.prompt
+          ...data,
+          createdAt: data.createdAt?.toDate() || new Date(),
         });
       });
       
-      setPitches(pitchesData);
-    } catch (err) {
-      console.error('Error fetching pitches:', err);
-      setError('Failed to load your pitches. Please try again.');
+      // Process AI responses data
+      const responsesData = [];
+      responsesSnapshot.forEach((doc) => {
+        const data = doc.data();
+        responsesData.push({
+          id: doc.id,
+          ...data,
+          timestamp: data.timestamp?.toDate() || new Date(),
+        });
+      });
+      
+      // Combine ideas with their responses if available
+      const combinedPitches = ideasData.map(idea => {
+        // Find matching response based on prompt content (simplified matching)
+        const matchingResponse = responsesData.find(response => 
+          response.prompt && response.prompt.includes(idea.startupIdea)
+        );
+        
+        return {
+          ...idea,
+          response: matchingResponse?.response || null,
+          parsedResponse: matchingResponse?.response ? parseGeminiResponse(matchingResponse.response) : null
+        };
+      });
+      
+      setPitches(combinedPitches);
+    } catch (error) {
+      console.error('Error fetching pitches:', error);
+      setError('Failed to load pitches');
     } finally {
       setLoading(false);
     }
   };
 
-  const parseGeminiResponse = (response) => {
-    // Initialize an object to store the parsed sections
+  const parseGeminiResponse = (text) => {
+    // This function parses the AI response into structured sections
     const sections = {};
     
-    // Try to extract the startup name
-    const startupNameMatch = response.match(/Startup Name:\s*([^\n]+)/);
+    // Extract startup name
+    const startupNameMatch = text.match(/Startup Name:?\s*([^\n]+)/i);
     if (startupNameMatch) sections.startupName = startupNameMatch[1].trim();
     
-    // Try to extract the pitch
-    const pitchMatch = response.match(/Pitch:\s*([\s\S]*?)(?=\d\.\s*[A-Za-z]|$)/);
+    // Extract tagline
+    const taglineMatch = text.match(/Tagline:?\s*([^\n]+)/i);
+    if (taglineMatch) sections.tagline = taglineMatch[1].trim();
+    
+    // Extract pitch (more complex as it can be multiple paragraphs)
+    const pitchMatch = text.match(/Pitch:?\s*([\s\S]*?)(?=\n\s*(?:Target Audience|Market Analysis|Competition|Landing Page|Improvement|$))/i);
     if (pitchMatch) sections.pitch = pitchMatch[1].trim();
+    
+    // Extract target audience
+    const targetMatch = text.match(/Target Audience:?\s*([\s\S]*?)(?=\n\s*(?:Market Analysis|Competition|Landing Page|Improvement|$))/i);
+    if (targetMatch) sections.targetAudience = targetMatch[1].trim();
+    
+    // Extract market analysis if available
+    const marketMatch = text.match(/Market Analysis:?\s*([\s\S]*?)(?=\n\s*(?:Competition|Landing Page|Improvement|$))/i);
+    if (marketMatch) sections.marketAnalysis = marketMatch[1].trim();
+    
+    // Extract competition if available
+    const competitionMatch = text.match(/Competition:?\s*([\s\S]*?)(?=\n\s*(?:Landing Page|Improvement|$))/i);
+    if (competitionMatch) sections.competition = competitionMatch[1].trim();
+    
+    // Extract landing page idea
+    const landingPageMatch = text.match(/Landing Page Idea:?\s*([\s\S]*?)(?=\n\s*(?:Improvement|$))/i);
+    if (landingPageMatch) sections.landingPage = landingPageMatch[1].trim();
+    
+    // Extract improvement tips if available
+    const improvementMatch = text.match(/Improvement Tips:?\s*([\s\S]*?)(?=$)/i);
+    if (improvementMatch) sections.improvementTips = improvementMatch[1].trim();
     
     return sections;
   };
 
-  const getSummary = (text) => {
-    // Get first 150 characters as summary
-    return text.length > 150 ? `${text.substring(0, 150)}...` : text;
-  };
-
-  const handleDeletePitch = async (id) => {
-    if (!window.confirm('Are you sure you want to delete this pitch?')) return;
-    
-    try {
-      await deleteDoc(doc(db, `users/${user.uid}/geminiResponses`, id));
-      setPitches(pitches.filter(pitch => pitch.id !== id));
-    } catch (err) {
-      console.error('Error deleting pitch:', err);
-      setError('Failed to delete the pitch. Please try again.');
-    }
-  };
-
-  const handleViewPitch = (pitch) => {
-    setSelectedPitch(pitch);
-    setShowModal(true);
-  };
-  
-  const handleSaveAsPdf = async (pitch) => {
-    setIsGeneratingPdf(true);
-    try {
-      const content = document.createElement('div');
-      content.innerHTML = `
-        <div style="padding: 20px; font-family: Arial, sans-serif;">
-          <h1 style="color: #2563eb; font-size: 24px; margin-bottom: 10px;">${pitch.startupName}</h1>
-          <div style="white-space: pre-line; font-size: 14px;">${pitch.fullResponse}</div>
-        </div>
-      `;
-      
-      const opt = {
-        margin: [10, 10, 10, 10],
-        filename: `${pitch.startupName.replace(/\s+/g, '-').toLowerCase()}-pitch.pdf`,
-        image: { type: 'jpeg', quality: 0.98 },
-        html2canvas: { scale: 2 },
-        jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait' }
-      };
-      
-      await html2pdf().from(content).set(opt).save();
-      
-      setSuccess('PDF saved successfully!');
-      setTimeout(() => setSuccess(''), 3000);
-    } catch (err) {
-      console.error('Error generating PDF:', err);
-      setError('Failed to generate PDF. Please try again.');
-      setTimeout(() => setError(''), 3000);
-    } finally {
-      setIsGeneratingPdf(false);
-    }
-  };
-
-  const formatDate = (date) => {
-    return new Intl.DateTimeFormat('en-US', {
-      year: 'numeric',
-      month: 'short',
-      day: 'numeric',
-      hour: 'numeric',
-      minute: 'numeric'
-    }).format(date);
-  };
-  
   const handleLogout = async () => {
     try {
       await logout();
       navigate('/login');
     } catch (error) {
-      console.error('Error logging out:', error);
-      setError('Failed to log out. Please try again.');
+      console.error('Logout error:', error);
     }
   };
-  
-  const handleRegeneratePitch = async () => {
-    if (!selectedPitch) return;
-    navigate('/pitch', { state: { prompt: selectedPitch.prompt } });
+
+  const handlePitchClick = (pitch) => {
+    setSelectedPitch(pitch);
+    setShowModal(true);
   };
-  
-  const toggleDarkMode = () => {
-    setIsDarkMode(!isDarkMode);
+
+  const handleGeneratePDF = async () => {
+    if (!selectedPitch || !selectedPitch.parsedResponse) return;
+    
+    setGeneratingPdf(true);
+    
+    try {
+      const element = document.getElementById('pitch-pdf-content');
+      
+      // Format startup name for filename
+      const startupName = selectedPitch.parsedResponse.startupName || 'Startup';
+      const safeFileName = `Pitch_${startupName.replace(/[^a-z0-9]/gi, '_')}.pdf`;
+      
+      // Use a more reliable approach with explicit worker and save method
+      const opt = {
+        margin: 10,
+        filename: safeFileName,
+        image: { type: 'jpeg', quality: 0.98 },
+        html2canvas: { scale: 2, useCORS: true },
+        jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait' }
+      };
+      
+      // Create worker and explicitly call save()
+      await html2pdf()
+        .from(element)
+        .set(opt)
+        .save();
+    } catch (error) {
+      console.error('Error generating PDF:', error);
+    } finally {
+      setGeneratingPdf(false);
+    }
   };
-  
-  const toggleSidebar = () => {
-    setIsSidebarOpen(!isSidebarOpen);
+
+  const formatDate = (date) => {
+    if (!date) return 'Unknown date';
+    return new Date(date).toLocaleDateString('en-US', {
+      year: 'numeric',
+      month: 'long',
+      day: 'numeric'
+    });
   };
-  
-  const filteredPitches = pitches.filter(pitch => {
-    if (!searchTerm.trim()) return true;
-    const term = searchTerm.toLowerCase();
-    return (
-      pitch.startupName.toLowerCase().includes(term) ||
-      pitch.summary.toLowerCase().includes(term) ||
-      pitch.fullResponse.toLowerCase().includes(term)
-    );
-  });
 
   return (
-    <div className={`min-h-screen ${isDarkMode ? 'bg-gray-900 text-white' : 'bg-gray-50 text-gray-900'} transition-colors duration-300`}>
-      {/* Sidebar */}
-      <div className={`fixed inset-y-0 left-0 z-30 w-64 transform ${isSidebarOpen ? 'translate-x-0' : '-translate-x-full'} transition-transform duration-300 ease-in-out ${isDarkMode ? 'bg-gray-800' : 'bg-white'} shadow-xl`}>
-        <div className="flex items-center justify-between h-16 px-6 border-b border-gray-200 dark:border-gray-700">
-          <div className="flex items-center">
-            <span className="text-xl font-bold bg-gradient-to-r from-blue-500 to-indigo-600 bg-clip-text text-transparent">PitchDeck</span>
-          </div>
-          <button onClick={toggleSidebar} className="p-1 rounded-md hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors duration-200">
-            <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-            </svg>
-          </button>
-        </div>
-        <nav className="mt-5 px-4 space-y-2">
-          <a href="#" className={`flex items-center px-4 py-3 rounded-lg ${isDarkMode ? 'bg-gray-700 text-white' : 'bg-blue-50 text-blue-700'} transition-colors duration-200`}>
-            <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 mr-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
-            </svg>
-            New Pitch
-          </a>
-          <a onClick={() => navigate('/pitch')} className={`flex items-center px-4 py-3 rounded-lg ${isDarkMode ? 'text-gray-300 hover:bg-gray-700' : 'text-gray-700 hover:bg-gray-100'} cursor-pointer transition-colors duration-200`}>
-            <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 mr-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
-            </svg>
-            Settings
-          </a>
-          <a onClick={handleLogout} className={`flex items-center px-4 py-3 rounded-lg ${isDarkMode ? 'text-gray-300 hover:bg-gray-700' : 'text-gray-700 hover:bg-gray-100'} cursor-pointer transition-colors duration-200`}>
-            <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 mr-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" />
-            </svg>
-            Logout
-          </a>
-        </nav>
-        <div className="absolute bottom-0 w-full p-4 border-t border-gray-200 dark:border-gray-700">
-          <div className="flex items-center justify-between">
-            <span className={`text-sm ${isDarkMode ? 'text-gray-400' : 'text-gray-500'}`}>Theme</span>
-            <button 
-              onClick={toggleDarkMode}
-              className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors duration-300 focus:outline-none ${isDarkMode ? 'bg-blue-600' : 'bg-gray-200'}`}
+    <div className="min-h-screen bg-gray-900 text-white">
+      {/* Header */}
+      <header className="bg-gray-800 shadow-lg">
+        <div className="container mx-auto px-4 py-6 flex justify-between items-center">
+          <h1 className="text-2xl font-bold text-blue-400">Startup Pitch Dashboard</h1>
+          <div className="flex items-center space-x-4">
+            {user && (
+              <span className="text-sm text-gray-300">
+                {user.email}
+              </span>
+            )}
+            <button
+              onClick={() => navigate('/pitch')}
+              className="bg-blue-500 hover:bg-blue-600 text-white text-sm font-medium py-2 px-4 rounded-md transition duration-200"
             >
-              <span className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform duration-300 ${isDarkMode ? 'translate-x-6' : 'translate-x-1'}`} />
+              Create New Pitch
+            </button>
+            <button
+              onClick={handleLogout}
+              className="bg-red-500 hover:bg-red-600 text-white text-sm font-medium py-2 px-4 rounded-md transition duration-200"
+            >
+              Logout
             </button>
           </div>
         </div>
-      </div>
-      
+      </header>
+
       {/* Main Content */}
-      <div className={`${isSidebarOpen ? 'md:ml-64' : ''} transition-all duration-300 ease-in-out`}>
-        {/* Top Bar */}
-        <header className={`sticky top-0 z-20 ${isDarkMode ? 'bg-gray-800' : 'bg-white'} shadow-sm backdrop-blur-lg bg-opacity-80`}>
-          <div className="px-4 sm:px-6 lg:px-8 py-4 flex justify-between items-center">
-            <div className="flex items-center">
-              <button onClick={toggleSidebar} className="p-2 rounded-md mr-4 hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors duration-200">
-                <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 12h16M4 18h16" />
-                </svg>
-              </button>
-              <h1 className="text-2xl font-bold bg-gradient-to-r from-blue-500 to-indigo-600 bg-clip-text text-transparent hidden md:block">Dashboard</h1>
-            </div>
-            <div className="flex items-center space-x-4">
-              <div className="relative">
-                <input
-                  type="text"
-                  placeholder="Search pitches..."
-                  value={searchTerm}
-                  onChange={(e) => setSearchTerm(e.target.value)}
-                  className={`w-full md:w-64 pl-10 pr-4 py-2 rounded-lg ${isDarkMode ? 'bg-gray-700 text-white placeholder-gray-400 border-gray-600' : 'bg-gray-100 text-gray-900 placeholder-gray-500 border-gray-300'} border focus:outline-none focus:ring-2 focus:ring-blue-500 transition-colors duration-200`}
-                />
-                <div className="absolute left-3 top-2.5">
-                  <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
-                  </svg>
-                </div>
+      <main className="container mx-auto px-4 py-8">
+        {/* User Profile Section */}
+        <section className="mb-10 bg-gray-800 rounded-lg shadow-lg p-6">
+          <h2 className="text-xl font-semibold mb-4 text-blue-300">User Profile</h2>
+          {userProfile ? (
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div>
+                <p className="text-gray-400">Email:</p>
+                <p className="font-medium">{userProfile.email}</p>
               </div>
-              <button
-                onClick={() => navigate('/pitch')}
-                className="inline-flex items-center px-4 py-2 border border-transparent rounded-lg shadow-sm text-sm font-medium text-white bg-gradient-to-r from-blue-500 to-indigo-600 hover:from-blue-600 hover:to-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 transition-all duration-300 ease-in-out"
-              >
-                <svg className="-ml-1 mr-2 h-5 w-5" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor">
-                  <path fillRule="evenodd" d="M10 3a1 1 0 011 1v5h5a1 1 0 110 2h-5v5a1 1 0 11-2 0v-5H4a1 1 0 110-2h5V4a1 1 0 011-1z" clipRule="evenodd" />
-                </svg>
-                New Pitch
-              </button>
-              {user && (
-                <div className="flex items-center space-x-3">
-                  <div className="hidden md:block text-right">
-                    <div className="text-sm font-medium">{user.displayName || 'User'}</div>
-                    <div className="text-xs text-gray-500 dark:text-gray-400">{user.email}</div>
-                  </div>
-                  <div className={`h-10 w-10 rounded-full flex items-center justify-center text-white font-medium ${isDarkMode ? 'bg-blue-600' : 'bg-gradient-to-r from-blue-500 to-indigo-600'}`}>
-                    {user.displayName ? user.displayName.charAt(0).toUpperCase() : user.email.charAt(0).toUpperCase()}
-                  </div>
+              <div>
+                <p className="text-gray-400">Account Created:</p>
+                <p className="font-medium">{userProfile.createdAt ? formatDate(userProfile.createdAt.toDate()) : 'Unknown'}</p>
+              </div>
+              {userProfile.displayName && (
+                <div>
+                  <p className="text-gray-400">Name:</p>
+                  <p className="font-medium">{userProfile.displayName}</p>
                 </div>
               )}
             </div>
-          </div>
-        </header>
+          ) : loading ? (
+            <p className="text-gray-400">Loading profile...</p>
+          ) : (
+            <p className="text-gray-400">No profile information available</p>
+          )}
+        </section>
 
-      {/* Main content */}
-      <main className="px-4 sm:px-6 lg:px-8 py-8 transition-all duration-300 ease-in-out">
-        {/* Welcome Section */}
-        <div className={`mb-8 ${isDarkMode ? 'text-white' : 'text-gray-900'}`}>
-          <h2 className="text-3xl font-bold">Welcome back, {user?.displayName || 'User'} 👋</h2>
-          <p className="text-sm mt-1 text-gray-500 dark:text-gray-400">{user?.email}</p>
-          <div className="mt-4 flex items-center">
-            <div className={`px-4 py-2 rounded-lg ${isDarkMode ? 'bg-gray-800' : 'bg-white/70 backdrop-blur-lg'} shadow-sm flex items-center`}>
-              <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 text-blue-500 mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-              </svg>
-              <span className="text-sm font-medium">Total Pitches: {pitches.length}</span>
+        {/* Pitches Section */}
+        <section className="bg-gray-800 rounded-lg shadow-lg p-6">
+          <h2 className="text-xl font-semibold mb-6 text-blue-300">Your Pitches</h2>
+          
+          {loading ? (
+            <div className="flex justify-center items-center py-10">
+              <div className="animate-spin rounded-full h-12 w-12 border-t-2 border-b-2 border-blue-500"></div>
             </div>
-          </div>
-        </div>
-
-        {/* Alerts */}
-        {error && (
-          <div className={`mb-6 p-4 ${isDarkMode ? 'bg-red-900/50 text-red-200' : 'bg-red-100 text-red-700'} border ${isDarkMode ? 'border-red-800' : 'border-red-400'} rounded-lg shadow-sm`}>
-            <div className="flex items-center">
-              <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-              </svg>
+          ) : error ? (
+            <div className="bg-red-900/30 border border-red-500 text-red-300 p-4 rounded-md">
               {error}
             </div>
-          </div>
-        )}
-
-        {/* Success Message */}
-        {success && (
-          <div className={`mb-6 p-4 ${isDarkMode ? 'bg-green-900/50 text-green-200' : 'bg-green-100 text-green-700'} border ${isDarkMode ? 'border-green-800' : 'border-green-400'} rounded-lg shadow-sm animate-fade-in`}>
-            <div className="flex items-center">
-              <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
-              </svg>
-              {success}
-            </div>
-          </div>
-        )}
-
-        {/* Loading State */}
-        {loading ? (
-          <div className="flex flex-col justify-center items-center h-64">
-            <div className="animate-spin rounded-full h-12 w-12 border-t-2 border-b-2 border-blue-500 mb-4"></div>
-            <p className={`text-sm ${isDarkMode ? 'text-gray-400' : 'text-gray-500'}`}>Loading your pitches...</p>
-          </div>
-        ) : filteredPitches.length === 0 ? (
-          <div className={`${isDarkMode ? 'bg-gray-800' : 'bg-white/70 backdrop-blur-lg'} rounded-2xl shadow-xl p-8 text-center transition-all duration-300 ease-in-out`}>
-            <div className="w-20 h-20 mx-auto rounded-full flex items-center justify-center bg-gradient-to-r from-blue-500 to-indigo-600 mb-4">
-              <svg className="h-10 w-10 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z" />
-              </svg>
-            </div>
-            <h3 className={`mt-2 text-xl font-semibold ${isDarkMode ? 'text-white' : 'text-gray-900'}`}>
-              {searchTerm ? 'No matching pitches found' : 'No pitches found yet'}
-            </h3>
-            <p className={`mt-2 text-sm ${isDarkMode ? 'text-gray-400' : 'text-gray-500'}`}>
-              {searchTerm 
-                ? 'Try adjusting your search term or clear the search to see all pitches.'
-                : 'Get started by creating your first startup pitch.'}
-            </p>
-            {!searchTerm && (
-              <div className="mt-6">
-                <button
-                  onClick={() => navigate('/pitch')}
-                  className="inline-flex items-center px-5 py-2.5 border border-transparent rounded-lg shadow-sm text-sm font-medium text-white bg-gradient-to-r from-blue-500 to-indigo-600 hover:from-blue-600 hover:to-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 transition-all duration-300 ease-in-out"
-                >
-                  <svg className="-ml-1 mr-2 h-5 w-5" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor">
-                    <path fillRule="evenodd" d="M10 3a1 1 0 011 1v5h5a1 1 0 110 2h-5v5a1 1 0 11-2 0v-5H4a1 1 0 110-2h5V4a1 1 0 011-1z" clipRule="evenodd" />
-                  </svg>
-                  Create New Pitch
-                </button>
-              </div>
-            )}
-          </div>
-        ) : (
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-            {filteredPitches.map((pitch) => (
-              <div 
-                key={pitch.id} 
-                className={`${isDarkMode ? 'bg-gray-800 hover:bg-gray-750' : 'bg-white/70 backdrop-blur-lg hover:bg-white/90'} rounded-2xl shadow-xl p-6 transition-all duration-300 ease-in-out transform hover:-translate-y-1 hover:shadow-2xl group`}
+          ) : pitches.length === 0 ? (
+            <div className="text-center py-10">
+              <p className="text-gray-400 mb-4">You haven't created any pitches yet.</p>
+              <button
+                onClick={() => navigate('/pitch')}
+                className="bg-blue-500 hover:bg-blue-600 text-white font-medium py-2 px-6 rounded-md transition duration-200"
               >
-                <div className="flex justify-between items-start mb-3">
-                  <div className="flex-1">
-                    <h2 className={`text-xl font-bold ${isDarkMode ? 'text-white' : 'text-gray-900'} mb-1 truncate`}>{pitch.startupName}</h2>
-                    <div className="flex items-center">
-                      <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4 text-gray-400 mr-1" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
-                      </svg>
-                      <p className="text-gray-500 dark:text-gray-400 text-xs">{formatDate(pitch.createdAt)}</p>
+                Create Your First Pitch
+              </button>
+            </div>
+          ) : (
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+              {pitches.map((pitch) => (
+                <div 
+                  key={pitch.id} 
+                  className="bg-gray-700 rounded-lg shadow-md overflow-hidden hover:shadow-lg transition-shadow duration-200 cursor-pointer"
+                  onClick={() => handlePitchClick(pitch)}
+                >
+                  <div className="p-5">
+                    <div className="flex justify-between items-start mb-3">
+                      <span className="bg-blue-500/20 text-blue-300 text-xs font-medium px-2.5 py-0.5 rounded">
+                        {pitch.category}
+                      </span>
+                      <span className="text-xs text-gray-400">
+                        {formatDate(pitch.createdAt)}
+                      </span>
+                    </div>
+                    
+                    <h3 className="text-lg font-semibold mb-2 line-clamp-2">
+                      {pitch.parsedResponse?.startupName || pitch.startupIdea}
+                    </h3>
+                    
+                    {pitch.parsedResponse?.tagline && (
+                      <p className="text-sm text-gray-300 italic mb-3 line-clamp-2">
+                        "{pitch.parsedResponse.tagline}"
+                      </p>
+                    )}
+                    
+                    <div className="text-sm text-gray-400 line-clamp-3 mb-3">
+                      {pitch.startupIdea}
+                    </div>
+                    
+                    <div className="flex justify-between items-center text-xs text-gray-400 mb-3">
+                      <span>{pitch.marketType}</span>
+                      <span>{pitch.region}</span>
+                    </div>
+                    
+                    <div className="flex justify-between items-center">
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          navigate(`/live-preview/${pitch.id}`);
+                        }}
+                        className="bg-green-600 hover:bg-green-700 text-white text-xs font-medium py-1 px-2 rounded transition duration-200 flex items-center space-x-1"
+                      >
+                        <svg xmlns="http://www.w3.org/2000/svg" className="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
+                        </svg>
+                        <span>Live Preview</span>
+                      </button>
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handlePitchClick(pitch);
+                        }}
+                        className="text-blue-400 hover:text-blue-300 text-xs font-medium transition duration-200"
+                      >
+                        View Details
+                      </button>
                     </div>
                   </div>
-                  <div className="flex space-x-1">
-                    <button
-                      onClick={() => handleSaveAsPdf(pitch)}
-                      disabled={isGeneratingPdf}
-                      className={`p-1.5 rounded-lg ${isDarkMode ? 'text-gray-300 hover:bg-gray-700' : 'text-gray-500 hover:bg-gray-100'} transition-colors duration-200 focus:outline-none`}
-                      title="Download PDF"
-                    >
-                      {isGeneratingPdf ? (
-                        <div className="animate-spin h-5 w-5 border-2 border-gray-500 rounded-full border-t-transparent"></div>
-                      ) : (
-                        <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
-                        </svg>
-                      )}
-                    </button>
-                    <button
-                      onClick={() => handleDeletePitch(pitch.id)}
-                      className={`p-1.5 rounded-lg ${isDarkMode ? 'text-gray-300 hover:bg-red-900/50' : 'text-gray-500 hover:bg-red-100'} transition-colors duration-200 focus:outline-none`}
-                      title="Delete Pitch"
-                    >
-                      <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-                      </svg>
-                    </button>
-                  </div>
                 </div>
-                
-                <div className="mb-3 px-2 py-1 text-xs inline-block rounded-full bg-gradient-to-r from-blue-500/10 to-indigo-500/10 text-blue-600 dark:text-blue-400 font-medium">
-                  {pitch.category || 'Startup'}
-                </div>
-                
-                <div className={`${isDarkMode ? 'text-gray-300' : 'text-gray-700'} mb-6 h-24 overflow-hidden relative`}>
-                  {pitch.summary}
-                  <div className={`absolute bottom-0 left-0 right-0 h-12 bg-gradient-to-t ${isDarkMode ? 'from-gray-800' : 'from-white/70'} to-transparent`}></div>
-                </div>
-                
-                <button
-                  onClick={() => handleViewPitch(pitch)}
-                  className={`w-full py-2.5 px-4 rounded-lg ${isDarkMode ? 'bg-gray-700 hover:bg-gray-600' : 'bg-blue-50 hover:bg-blue-100'} ${isDarkMode ? 'text-blue-400' : 'text-blue-600'} font-medium text-sm flex items-center justify-center transition-colors duration-300 ease-in-out group-hover:bg-gradient-to-r group-hover:from-blue-500 group-hover:to-indigo-600 group-hover:text-white`}
-                >
-                  View Full Pitch
-                  <svg className="ml-2 h-4 w-4" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor">
-                    <path fillRule="evenodd" d="M7.293 14.707a1 1 0 010-1.414L10.586 10 7.293 6.707a1 1 0 011.414-1.414l4 4a1 1 0 010 1.414l-4 4a1 1 0 01-1.414 0z" clipRule="evenodd" />
-                  </svg>
-                </button>
-              </div>
-            ))}
-          </div>
-        )}
+              ))}
+            </div>
+          )}
+        </section>
       </main>
 
-      {/* Modal for viewing full pitch */}
+      {/* Modal for Pitch Details */}
       {showModal && selectedPitch && (
-        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4 z-50 animate-fade-in">
-          <div className={`${isDarkMode ? 'bg-gray-800 text-white' : 'bg-white'} rounded-2xl shadow-2xl max-w-4xl w-full max-h-[90vh] overflow-hidden transition-all duration-300 ease-in-out`}>
-            <div className="sticky top-0 z-10 px-6 py-4 border-b border-gray-200 dark:border-gray-700 backdrop-blur-lg bg-white/80 dark:bg-gray-800/80 flex justify-between items-center">
-              <h3 className={`text-lg font-medium ${isDarkMode ? 'text-white' : 'text-gray-900'}`}>{selectedPitch.startupName}</h3>
-              <div className="flex items-center space-x-2">
-                <button
-                  onClick={handleRegeneratePitch}
-                  className="px-4 py-2 rounded-lg bg-gradient-to-r from-blue-500 to-indigo-600 text-white text-sm font-medium hover:from-blue-600 hover:to-indigo-700 transition-all duration-300 ease-in-out flex items-center"
-                >
-                  <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4 mr-1" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-                  </svg>
-                  Regenerate
-                </button>
-                <button
-                  onClick={() => handleSaveAsPdf(selectedPitch)}
-                  disabled={isGeneratingPdf}
-                  className="px-4 py-2 rounded-lg bg-gray-100 dark:bg-gray-700 text-gray-700 dark:text-gray-300 text-sm font-medium hover:bg-gray-200 dark:hover:bg-gray-600 transition-all duration-300 ease-in-out flex items-center"
-                >
-                  {isGeneratingPdf ? (
-                    <>
-                      <div className="animate-spin h-4 w-4 border-2 border-gray-500 rounded-full border-t-transparent mr-1"></div>
-                      Saving...
-                    </>
-                  ) : (
-                    <>
-                      <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4 mr-1" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
-                      </svg>
-                      Save as PDF
-                    </>
+        <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50 p-4">
+          <div className="bg-gray-800 rounded-lg shadow-xl max-w-4xl w-full max-h-[90vh] overflow-y-auto">
+            <div className="p-6">
+              <div className="flex justify-between items-start mb-6">
+                <div>
+                  <h3 className="text-2xl font-bold text-blue-400">
+                    {selectedPitch.parsedResponse?.startupName || selectedPitch.startupIdea}
+                  </h3>
+                  {selectedPitch.parsedResponse?.tagline && (
+                    <p className="text-gray-300 italic mt-1">
+                      {selectedPitch.parsedResponse.tagline}
+                    </p>
                   )}
-                </button>
-                <button
+                </div>
+                
+                <button 
                   onClick={() => setShowModal(false)}
-                  className={`p-2 rounded-full ${isDarkMode ? 'text-gray-400 hover:bg-gray-700 hover:text-white' : 'text-gray-500 hover:bg-gray-100 hover:text-gray-700'} transition-colors duration-200`}
-                  aria-label="Close"
+                  className="text-gray-400 hover:text-white"
                 >
-                  <svg className="h-5 w-5" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
                   </svg>
                 </button>
               </div>
-            </div>
-            <div className="p-6 overflow-y-auto max-h-[calc(90vh-8rem)]" id="pitch-content-for-pdf">
-              <div className="mb-4 flex items-center">
-                <div className="px-3 py-1 text-xs rounded-full bg-gradient-to-r from-blue-500/10 to-indigo-500/10 text-blue-600 dark:text-blue-400 font-medium">
-                  {selectedPitch.category || 'Startup'}
+              
+              <div className="flex justify-between items-center mb-6">
+                <div className="flex items-center space-x-4">
+                  <span className="bg-blue-500/20 text-blue-300 text-sm font-medium px-2.5 py-0.5 rounded">
+                    {selectedPitch.category}
+                  </span>
+                  <span className="text-sm text-gray-400">
+                    Created: {formatDate(selectedPitch.createdAt)}
+                  </span>
                 </div>
-                <div className="ml-3 text-xs text-gray-500 dark:text-gray-400 flex items-center">
-                  <svg xmlns="http://www.w3.org/2000/svg" className="h-3 w-3 mr-1" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
-                  </svg>
-                  {formatDate(selectedPitch.createdAt)}
+                
+                <div className="flex space-x-3">
+                  <button
+                    onClick={() => navigate(`/live-preview/${selectedPitch.id}`)}
+                    className="bg-green-600 hover:bg-green-700 text-white text-sm font-medium py-2 px-4 rounded-md transition duration-200 flex items-center space-x-2"
+                  >
+                    <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
+                    </svg>
+                    <span>Live Preview</span>
+                  </button>
+                  
+                  <button
+                    onClick={handleGeneratePDF}
+                    disabled={generatingPdf}
+                    className="bg-purple-600 hover:bg-purple-700 text-white text-sm font-medium py-2 px-4 rounded-md transition duration-200 disabled:opacity-50 flex items-center space-x-2"
+                  >
+                    {generatingPdf ? (
+                      <>
+                        <svg className="animate-spin h-4 w-4 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                          <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                          <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                        </svg>
+                        <span>Generating...</span>
+                      </>
+                    ) : (
+                      <>
+                        <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+                        </svg>
+                        <span>Save as PDF</span>
+                      </>
+                    )}
+                  </button>
                 </div>
               </div>
-              <div className={`prose max-w-none ${isDarkMode ? 'prose-invert' : ''}`}>
-                <div className="whitespace-pre-line">{selectedPitch.fullResponse}</div>
+              
+              <div id="pitch-pdf-content" className="bg-white text-gray-900 rounded-lg p-8">
+                {/* PDF Content */}
+                <div className="text-center mb-8">
+                  <h1 className="text-3xl font-bold text-gray-800">
+                    {selectedPitch.parsedResponse?.startupName || selectedPitch.startupIdea}
+                  </h1>
+                  {selectedPitch.parsedResponse?.tagline && (
+                    <p className="text-xl text-gray-600 italic mt-2">
+                      {selectedPitch.parsedResponse.tagline}
+                    </p>
+                  )}
+                </div>
+                
+                <div className="prose max-w-none">
+                  {/* Original Idea */}
+                  <div className="mb-6">
+                    <h2 className="text-xl font-semibold text-gray-800 mb-2">Original Idea</h2>
+                    <p>{selectedPitch.startupIdea}</p>
+                    <div className="grid grid-cols-2 gap-4 mt-4 text-sm">
+                      <div>
+                        <span className="font-medium">Category:</span> {selectedPitch.category}
+                      </div>
+                      <div>
+                        <span className="font-medium">Market Type:</span> {selectedPitch.marketType}
+                      </div>
+                      <div>
+                        <span className="font-medium">Region:</span> {selectedPitch.region}
+                      </div>
+                      {selectedPitch.additionalNotes && (
+                        <div className="col-span-2">
+                          <span className="font-medium">Additional Notes:</span> {selectedPitch.additionalNotes}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                  
+                  {/* AI Generated Pitch */}
+                  {selectedPitch.parsedResponse && (
+                    <>
+                      {/* Pitch */}
+                      {selectedPitch.parsedResponse.pitch && (
+                        <div className="mb-6">
+                          <h2 className="text-xl font-semibold text-gray-800 mb-2">Pitch</h2>
+                          <div className="whitespace-pre-line">{selectedPitch.parsedResponse.pitch}</div>
+                        </div>
+                      )}
+                      
+                      {/* Target Audience */}
+                      {selectedPitch.parsedResponse.targetAudience && (
+                        <div className="mb-6">
+                          <h2 className="text-xl font-semibold text-gray-800 mb-2">Target Audience</h2>
+                          <div className="whitespace-pre-line">{selectedPitch.parsedResponse.targetAudience}</div>
+                        </div>
+                      )}
+                      
+                      {/* Market Analysis */}
+                      {selectedPitch.parsedResponse.marketAnalysis && (
+                        <div className="mb-6">
+                          <h2 className="text-xl font-semibold text-gray-800 mb-2">Market Analysis</h2>
+                          <div className="whitespace-pre-line">{selectedPitch.parsedResponse.marketAnalysis}</div>
+                        </div>
+                      )}
+                      
+                      {/* Competition */}
+                      {selectedPitch.parsedResponse.competition && (
+                        <div className="mb-6">
+                          <h2 className="text-xl font-semibold text-gray-800 mb-2">Competition</h2>
+                          <div className="whitespace-pre-line">{selectedPitch.parsedResponse.competition}</div>
+                        </div>
+                      )}
+                      
+                      {/* Landing Page */}
+                      {selectedPitch.parsedResponse.landingPage && (
+                        <div className="mb-6">
+                          <h2 className="text-xl font-semibold text-gray-800 mb-2">Landing Page Idea</h2>
+                          <div className="whitespace-pre-line">{selectedPitch.parsedResponse.landingPage}</div>
+                        </div>
+                      )}
+                      
+                      {/* Improvement Tips */}
+                      {selectedPitch.parsedResponse.improvementTips && (
+                        <div className="mb-6">
+                          <h2 className="text-xl font-semibold text-gray-800 mb-2">Improvement Tips</h2>
+                          <div className="whitespace-pre-line">{selectedPitch.parsedResponse.improvementTips}</div>
+                        </div>
+                      )}
+                    </>
+                  )}
+                </div>
               </div>
             </div>
           </div>

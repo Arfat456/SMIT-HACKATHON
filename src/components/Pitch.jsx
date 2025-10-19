@@ -172,7 +172,7 @@ function Pitch() {
           {user && (
             <div className="flex space-x-3">
               <button
-                onClick={() => navigate('/dashboard')}
+                onClick={() => navigate('/dashboard', { replace: true })}
                 className="bg-blue-500 hover:bg-blue-600 text-white px-4 py-2 rounded-md text-sm font-medium transition-colors flex items-center"
               >
                 <svg className="mr-2 h-4 w-4" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor">

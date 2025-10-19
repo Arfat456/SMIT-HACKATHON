@@ -11,6 +11,7 @@ import Home from "./components/Home";
 import Pitch from "./components/Pitch";
 import PitchResult from "./components/PitchResult";
 import Dashboard from "./components/Dashboard";
+import LivePreview from "./components/LivePreview";
 
 function App() {
   const [user, setUser] = useState(null);
@@ -101,6 +102,14 @@ function App() {
           element={
             <ProtectedRoute>
               <Dashboard />
+            </ProtectedRoute>
+          } 
+        />
+        <Route 
+          path="/live-preview/:pitchId" 
+          element={
+            <ProtectedRoute>
+              <LivePreview />
             </ProtectedRoute>
           } 
         />

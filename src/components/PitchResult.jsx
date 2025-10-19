@@ -179,34 +179,49 @@ function PitchResult() {
 
   const handleSaveAsPdf = () => {
     setGeneratingPdf(true);
+    setError('');
     
-    // Get the content to convert to PDF
-    const element = document.getElementById('pitch-content');
-    
-    // Configure html2pdf options
-    const opt = {
-      margin: 10,
-      filename: 'StartupPitch.pdf',
-      image: { type: 'jpeg', quality: 0.98 },
-      html2canvas: { scale: 2, useCORS: true },
-      jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait' }
-    };
-    
-    // Generate PDF
-    html2pdf()
-      .set(opt)
-      .from(element)
-      .save()
-      .then(() => {
-        setSuccess('PDF generated successfully!');
-        setTimeout(() => setSuccess(''), 3000);
-        setGeneratingPdf(false);
-      })
-      .catch(err => {
-        console.error('PDF generation error:', err);
-        setError('Failed to generate PDF. Please try again.');
-        setGeneratingPdf(false);
-      });
+    try {
+      // Get the content to convert to PDF
+      const element = document.getElementById('pitch-content');
+      
+      if (!element) {
+        throw new Error('Could not find content to convert to PDF');
+      }
+      
+      // Format startup name for filename
+      const startupName = editablePitchData?.name || 'StartupPitch';
+      const safeFileName = `Pitch_${startupName.replace(/[^a-z0-9]/gi, '_')}.pdf`;
+      
+      // Use a more reliable approach with explicit worker and save method
+      const opt = {
+        margin: 10,
+        filename: safeFileName,
+        image: { type: 'jpeg', quality: 0.98 },
+        html2canvas: { scale: 2, useCORS: true },
+        jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait' }
+      };
+      
+      // Create worker and explicitly call save()
+      const worker = html2pdf()
+        .from(element)
+        .set(opt)
+        .save()
+        .then(() => {
+          setSuccess('PDF downloaded successfully!');
+          setTimeout(() => setSuccess(''), 3000);
+          setGeneratingPdf(false);
+        })
+        .catch(err => {
+          console.error('PDF generation error:', err);
+          setError('Failed to generate PDF. Please try again.');
+          setGeneratingPdf(false);
+        });
+    } catch (err) {
+      console.error('PDF setup error:', err);
+      setError('Failed to set up PDF generation: ' + err.message);
+      setGeneratingPdf(false);
+    }
   };
 
   const handleLogout = async () => {
@@ -220,6 +235,10 @@ function PitchResult() {
 
   const handleGoBack = () => {
     navigate('/pitch');
+  };
+
+  const handleGoToDashboard = () => {
+    navigate('/dashboard', { replace: true });
   };
 
   if (!editablePitchData) {
@@ -246,7 +265,7 @@ function PitchResult() {
           {user && (
             <div className="flex space-x-3">
               <button
-                onClick={() => navigate('/dashboard')}
+                onClick={handleGoToDashboard}
                 className="bg-green-500 hover:bg-green-600 text-white px-4 py-2 rounded-md text-sm font-medium transition-colors flex items-center"
               >
                 <svg className="mr-2 h-4 w-4" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor">
